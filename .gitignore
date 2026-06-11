@@ -1,0 +1,86 @@
+# ==============================================
+# .gitignore — DevOps Observability Project
+# SECURITY: prevents sensitive files reaching
+# GitHub where bots scan 24/7 for credentials
+# ==============================================
+
+# --------------------------
+# AWS — NEVER push these
+# --------------------------
+*.pem
+*.ppk
+.aws/
+aws-credentials
+credentials
+
+# --------------------------
+# Environment variables
+# --------------------------
+.env
+.env.*
+*.env
+.envrc
+
+# --------------------------
+# SSH keys
+# --------------------------
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.key
+
+# --------------------------
+# Terraform
+# --------------------------
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.tfvars
+
+# --------------------------
+# Docker
+# --------------------------
+.docker/
+
+# --------------------------
+# OS files
+# --------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --------------------------
+# Editor files
+# --------------------------
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# --------------------------
+# Logs
+# --------------------------
+*.log
+logs/
+
+# --------------------------
+# Python
+# --------------------------
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+
+# --------------------------
+# Node
+# --------------------------
+node_modules/
+npm-debug.log
+
+# --------------------------
+# Temporary files
+# --------------------------
+*.tmp
+*.temp
+.cache/

@@ -1,0 +1,39 @@
+
+# ===========================================
+# .dockerignore — DevOps Observability Project
+# Prevents sensitive/unnecessary files from
+# being copied into the Docker image
+# ===========================================
+
+# Git history — never include version control internals
+.git
+.gitignore
+
+# Environment files — may contain secrets, API keys
+.env
+.env.*
+*.env
+
+# Documentation — not needed inside container
+docs/
+*.md
+README*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+
+# Test files
+*.test
+tests/
+
+# Logs — container generates its own
+*.log
+
+# Scripts — not needed inside nginx container
+scripts/

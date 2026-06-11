@@ -1,0 +1,35 @@
+# =============================================================
+# docker-compose.yml — DevOps Observability Project
+# For local development and testing ONLY
+# Production deployment uses GitHub Actions + direct docker run
+# =============================================================
+
+services:
+  devops-observability:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+
+    # Image tag — always points to latest stable version
+    image: devops-observability:v5
+
+    # Container name — replaces random Docker-assigned names
+    container_name: devops-observability-container
+
+    # Port mapping: host:container
+    ports:
+      - "8080:80"
+
+    # Restart policy — container auto-restarts if it crashes
+    # unless-stopped = restart always EXCEPT when manually stopped
+    # This is what keeps the app alive on EC2 after reboots
+    restart: unless-stopped
+
+    # Healthcheck — mirrors what we defined in Dockerfile
+    # Compose runs this independently to track container health
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
