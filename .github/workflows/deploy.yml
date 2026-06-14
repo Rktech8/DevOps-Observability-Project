@@ -1,0 +1,172 @@
+# =============================================================
+# deploy.yml — GitHub Actions CI/CD Pipeline
+# DevOps Observability Project
+# Trigger: every push to main branch
+# What: build → push to GHCR → deploy to EC2 via SSM
+# Why: automates what we did manually — repeatable, auditable
+# =============================================================
+
+name: Build and Deploy Nginx
+
+on:
+  push:
+    branches: [ main ]        # trigger only on main pushes
+    paths:
+      - 'app/**'              # only when app files change
+      - '.github/workflows/**' # or pipeline itself changes
+  workflow_dispatch:           # allow manual trigger from GitHub UI
+
+# ─────────────────────────────────────────────
+# PERMISSIONS — What this workflow token can do
+# id-token: write → needed for OIDC to work
+# contents: read  → checkout the repo code
+# packages: write → push image to GHCR
+# Why: GitHub denies everything by default —
+#      must explicitly grant each permission
+# ─────────────────────────────────────────────
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    name: Build → Push → Deploy
+    runs-on: ubuntu-latest     # GitHub-hosted runner (free tier)
+
+    steps:
+
+      # ───────────────────────────────────────
+      # STEP 1 — Checkout code
+      # What: pulls your repo code onto runner
+      # Why:  runner starts empty — needs files
+      # ───────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ───────────────────────────────────────
+      # STEP 2 — Login to GHCR
+      # What: authenticates Docker with GHCR
+      # How:  uses CR_PAT secret we stored
+      # Why:  docker push needs auth
+      # ───────────────────────────────────────
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.CR_PAT }}" | docker login ghcr.io \
+            -u Rktech8 \
+            --password-stdin
+
+      # ───────────────────────────────────────
+      # STEP 3 — Build Docker image
+      # What: builds fresh image from app/
+      # How:  docker build reads Dockerfile
+      # Why:  ensures latest code is in image
+      # ───────────────────────────────────────
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ghcr.io/rktech8/devops-observability:latest \
+            -t ghcr.io/rktech8/devops-observability:${{ github.sha }} \
+            ./app
+
+      # ───────────────────────────────────────
+      # STEP 4 — Push to GHCR
+      # What: uploads image to registry
+      # How:  pushes both tags — sha + latest
+      # Why:  EC2 pulls from here, not local
+      # sha tag = exact commit, for rollback
+      # ───────────────────────────────────────
+      - name: Push to GHCR
+        run: |
+          docker push ghcr.io/rktech8/devops-observability:latest
+          docker push ghcr.io/rktech8/devops-observability:${{ github.sha }}
+
+      # ───────────────────────────────────────
+      # STEP 5 — Configure AWS credentials
+      # What: exchanges GitHub JWT for AWS creds
+      # How:  OIDC — no static keys stored
+      # Why:  all following steps need AWS access
+      # role-to-assume = our IAM role ARN
+      # ───────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # ───────────────────────────────────────
+      # STEP 6 — Deploy to EC2 via SSM
+      # What: sends shell commands to EC2
+      # How:  SSM SendCommand — no SSH needed
+      # Why:  pulls latest image, restarts container
+      # ───────────────────────────────────────
+      - name: Deploy to EC2 via SSM
+        id: deploy
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids ${{ vars.EC2_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "docker pull ghcr.io/rktech8/devops-observability:latest",
+              "docker stop devops-observability-container || true",
+              "docker rm devops-observability-container || true",
+              "docker run -d --name devops-observability-container --restart unless-stopped -p 80:80 ghcr.io/rktech8/devops-observability:latest",
+              "sleep 5",
+              "curl -f http://localhost/health || exit 1"
+            ]' \
+            --region ${{ vars.AWS_REGION }} \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "COMMAND_ID=$COMMAND_ID" >> $GITHUB_ENV
+
+          # Wait for command to complete
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id ${{ vars.EC2_INSTANCE_ID }} \
+            --region ${{ vars.AWS_REGION }}
+
+      # ───────────────────────────────────────
+      # STEP 7 — External Health Probe
+      # What: hits /health from GitHub runner
+      # How:  curl with retry — allows warmup
+      # Why:  independent verification from
+      #       outside EC2 (simulates real user)
+      # T1 measurement starts here if it fails
+      # ───────────────────────────────────────
+      - name: External Health Probe
+        run: |
+          echo "Probing http://$(aws ec2 describe-instances \
+            --instance-ids ${{ vars.EC2_INSTANCE_ID }} \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)/health"
+          
+          curl --fail \
+               --retry 5 \
+               --retry-delay 10 \
+               --retry-connrefused \
+               http://$(aws ec2 describe-instances \
+                 --instance-ids ${{ vars.EC2_INSTANCE_ID }} \
+                 --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                 --output text)/health
+
+      # ───────────────────────────────────────
+      # STEP 8 — Rollback on failure
+      # What: restarts previous container
+      # How:  only runs if step 6 or 7 failed
+      # Why:  maintains uptime — bad deploy
+      #       never leaves site broken
+      # ───────────────────────────────────────
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          aws ssm send-command \
+            --instance-ids ${{ vars.EC2_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "docker stop devops-observability-container || true",
+              "docker rm devops-observability-container || true",
+              "docker run -d --name devops-observability-container --restart unless-stopped -p 80:80 ghcr.io/rktech8/devops-observability:latest"
+            ]' \
+            --region ${{ vars.AWS_REGION }}
+          echo "⚠️ Rollback triggered — check deployment logs"
