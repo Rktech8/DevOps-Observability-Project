@@ -1,0 +1,100 @@
+name: Simulate Container Failure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform on container'
+        required: true
+        default: 'stop'
+        type: choice
+        options:
+          - stop
+          - start
+
+permissions:
+  id-token: write   # Required for OIDC token request
+  contents: read    # Required to read repo contents
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Record T0 — BEFORE action (failure injection time)
+        id: t0
+        run: |
+          T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "T0=$T0" >> $GITHUB_OUTPUT
+          echo "============================================"
+          echo "SIMULATION START"
+          echo "Action    : docker ${{ github.event.inputs.action }}"
+          echo "T0 (UTC)  : $T0   <-- RECORD THIS"
+          echo "============================================"
+
+      - name: Execute container action via SSM
+        id: ssm
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["docker ${{ github.event.inputs.action }} devops-observability-container"]}' \
+            --region "${{ vars.AWS_REGION }}" \
+            --query "Command.CommandId" \
+            --output text)
+          echo "SSM Command ID: $COMMAND_ID"
+          echo "COMMAND_ID=$COMMAND_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for SSM command to complete
+        run: |
+          aws ssm wait command-executed \
+            --command-id "${{ steps.ssm.outputs.COMMAND_ID }}" \
+            --instance-id "${{ vars.EC2_INSTANCE_ID }}" \
+            --region "${{ vars.AWS_REGION }}"
+          echo "SSM command executed successfully on EC2"
+
+      - name: Verify container status on EC2
+        run: |
+          VERIFY_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["docker inspect -f \"{{.State.Status}}\" devops-observability-container 2>/dev/null || echo container-not-found"]}' \
+            --region "${{ vars.AWS_REGION }}" \
+            --query "Command.CommandId" \
+            --output text)
+          sleep 5
+          aws ssm get-command-invocation \
+            --command-id "$VERIFY_ID" \
+            --instance-id "${{ vars.EC2_INSTANCE_ID }}" \
+            --query "StandardOutputContent" \
+            --output text
+
+      - name: Print data recording instructions
+        run: |
+          echo "============================================"
+          echo "SIMULATION SUMMARY"
+          echo "============================================"
+          echo "Action     : docker ${{ github.event.inputs.action }}"
+          echo "T0 (UTC)   : ${{ steps.t0.outputs.T0 }}"
+          echo "Instance   : ${{ vars.EC2_INSTANCE_ID }}"
+          echo "Container  : devops-observability-container"
+          echo "============================================"
+          if [ "${{ github.event.inputs.action }}" == "stop" ]; then
+            echo "NEXT STEPS (STOP simulation):"
+            echo "  1. Go to CloudWatch → Alarms → NginxHealthStatus → History"
+            echo "  2. T1 = exact time alarm entered ALARM state"
+            echo "  3. MTTD = T1 minus T0 above"
+            echo "  4. Run this workflow again with action=start to recover"
+          else
+            echo "NEXT STEPS (START / recovery):"
+            echo "  1. Go to CloudWatch → Alarms → NginxHealthStatus → History"
+            echo "  2. T2 = exact time alarm returned to OK state"
+            echo "  3. MTTR = T2 minus original stop T0"
+          fi
+          echo "============================================"
